@@ -101,4 +101,32 @@ router.delete('/delete', auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// GET /api/auth/profile — datos del perfil (requiere login)
+router.get('/profile', auth, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const user = await User.findById(userId).select('-passwordHash');
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    // Posición en el ranking global
+    const rank = await User.countDocuments({ totalPoints: { $gt: user.totalPoints } });
+
+    // Últimos 7 días de puntuación diaria
+    const DailyScore = require('../models/DailyScore');
+    const last7 = await DailyScore.find({ userId })
+      .sort({ date: -1 })
+      .limit(7)
+      .select('date points won attempts');
+
+    res.json({
+      user,
+      rank: rank + 1,
+      last7: last7.reverse(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 module.exports = router;
