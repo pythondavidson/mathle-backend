@@ -2,34 +2,25 @@ const express = require('express');
 const router = express.Router();
 const DailyScore = require('../models/DailyScore');
 const User = require('../models/User');
+const auth = require('../middleware/auth');
 
-// POST /api/daily/score — guardar resultado del juego diario
-router.post('/score', async (req, res) => {
+// POST /api/daily/score — requiere login
+router.post('/score', auth, async (req, res) => {
   try {
-    const { userId, date, attempts, points, won } = req.body;
+    const { date, attempts, points, won } = req.body;
+    const userId = req.user.userId;
 
-    // Evitar duplicados (un score por día por usuario)
     const existing = await DailyScore.findOne({ userId, date });
-    if (existing) {
-      return res.status(409).json({ error: 'Ya has jugado hoy' });
-    }
+    if (existing) return res.status(409).json({ error: 'Ya has jugado hoy' });
 
     const score = await DailyScore.create({ userId, date, attempts, points, won });
 
-    // Actualizar puntos totales y racha del usuario
     const user = await User.findById(userId);
     if (user) {
       user.totalPoints += points;
-
-      const today = date;
       const yesterday = new Date(new Date(date) - 86400000).toISOString().split('T')[0];
-
-      if (won) {
-        user.streakDays = user.lastPlayDate === yesterday ? user.streakDays + 1 : 1;
-      } else {
-        user.streakDays = 0;
-      }
-      user.lastPlayDate = today;
+      user.streakDays = won ? (user.lastPlayDate === yesterday ? user.streakDays + 1 : 1) : 0;
+      user.lastPlayDate = date;
       await user.save();
     }
 
@@ -39,20 +30,18 @@ router.post('/score', async (req, res) => {
   }
 });
 
-// GET /api/daily/leaderboard?filter=hoy|semana|alltime
+// GET /api/daily/leaderboard — público
 router.get('/leaderboard', async (req, res) => {
   try {
     const { filter = 'hoy' } = req.query;
     const today = new Date().toISOString().split('T')[0];
 
     let dateFilter = {};
-    if (filter === 'hoy') {
-      dateFilter = { date: today };
-    } else if (filter === 'semana') {
+    if (filter === 'hoy') dateFilter = { date: today };
+    else if (filter === 'semana') {
       const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
       dateFilter = { date: { $gte: weekAgo } };
     }
-    // alltime → sin filtro de fecha
 
     const scores = await DailyScore.aggregate([
       { $match: { won: true, ...dateFilter } },

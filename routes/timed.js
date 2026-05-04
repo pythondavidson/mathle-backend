@@ -1,14 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
+const auth = require('../middleware/auth');
 
-// Guardamos scores del contrareloj directamente en el usuario
-// (no tiene fecha fija, se puede jugar varias veces al día)
-
-// POST /api/timed/score — guardar puntuación del contrareloj
-router.post('/score', async (req, res) => {
+// POST /api/timed/score — requiere login
+router.post('/score', auth, async (req, res) => {
   try {
-    const { userId, points } = req.body;
+    const { points } = req.body;
+    const userId = req.user.userId;
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -22,7 +21,7 @@ router.post('/score', async (req, res) => {
   }
 });
 
-// GET /api/timed/leaderboard — top 10 por puntos totales
+// GET /api/timed/leaderboard — público
 router.get('/leaderboard', async (req, res) => {
   try {
     const users = await User.find()
