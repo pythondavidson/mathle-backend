@@ -14,6 +14,7 @@ const app = express();
 const allowedOrigins = [
   'http://localhost:3000',
   'https://mathle.online',
+  'https://mathle-online.vercel.app',  // ← añade esta
   'https://www.mathle.online',
 ];
 
