@@ -89,4 +89,16 @@ router.get('/me', async (req, res) => {
   }
 });
 
+// DELETE /api/auth/delete — eliminar cuenta (requiere login)
+const auth = require('../middleware/auth');
+
+router.delete('/delete', auth, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    await User.findByIdAndDelete(userId);
+    res.json({ message: 'Cuenta eliminada correctamente' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 module.exports = router;
