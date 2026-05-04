@@ -10,12 +10,23 @@ const authRoutes  = require('./routes/auth');
 const app = express();
 
 // ── CORS ────────────────────────────────────────────────
-const allowedOrigins = [
-  'http://localhost:3000',
-  'https://mathle.online',
-  'https://mathle-online.vercel.app',  // ← añade esta
-  'https://www.mathle.online',
-];
+app.use(cors({
+  origin: (origin, callback) => {
+    if (
+      !origin ||
+      origin === 'http://localhost:3000' ||
+      origin === 'https://mathle.online' ||
+      origin === 'https://www.mathle.online' ||
+      origin === 'https://mathle-online.vercel.app' ||
+      /^https:\/\/mathle-online.*\.vercel\.app$/.test(origin)
+    ) {
+      callback(null, true);
+    } else {
+      callback(new Error('No permitido por CORS'));
+    }
+  },
+  credentials: true,
+}));
 
 app.use(cors({
   origin: (origin, callback) => {
