@@ -134,4 +134,33 @@ router.get('/profile', auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// Añadir este endpoint en routes/auth.js ANTES de module.exports = router;
+
+// GET /api/auth/profile/public/:username — perfil público, sin email
+router.get('/profile/public/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const user = await User.findOne({ username }).select('-passwordHash -email');
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    const rank = await User.countDocuments({ totalPoints: { $gt: user.totalPoints } });
+
+    const DailyScore = require('../models/DailyScore');
+    const last7 = await DailyScore.find({ userId: user._id })
+      .sort({ date: -1 })
+      .limit(7)
+      .select('date points won attempts');
+
+    res.json({
+      username: user.username,
+      totalPoints: user.totalPoints,
+      streakDays: user.streakDays,
+      rank: rank + 1,
+      last7: last7.reverse(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
