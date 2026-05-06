@@ -47,7 +47,7 @@ router.post('/login', async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ error: 'Email y contraseña son obligatorios' });
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ $or: [{ email }, { username: email }] });
     if (!user)
       return res.status(401).json({ error: 'Credenciales incorrectas' });
 
