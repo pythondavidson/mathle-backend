@@ -2,18 +2,22 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
+const auth = require('../middleware/auth');
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // ── REGISTRO ────────────────────────────────────────────
-// POST /api/auth/register
 router.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
-    if (username.length > 10)
-      return res.status(400).json({ error: 'El usuario no puede tener más de 10 caracteres' });
 
     if (!username || !email || !password)
       return res.status(400).json({ error: 'Todos los campos son obligatorios' });
+
+    if (username.length > 10)
+      return res.status(400).json({ error: 'El usuario no puede tener más de 10 caracteres' });
 
     if (password.length < 6)
       return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
@@ -41,7 +45,6 @@ router.post('/register', async (req, res) => {
 });
 
 // ── LOGIN ───────────────────────────────────────────────
-// POST /api/auth/login
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -72,8 +75,56 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ── GOOGLE LOGIN ─────────────────────────────────────────
+router.post('/google', async (req, res) => {
+  try {
+    const { credential } = req.body;
+    if (!credential) return res.status(400).json({ error: 'Credential requerido' });
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, name } = payload;
+
+    let user = await User.findOne({ $or: [{ googleId }, { email }] });
+
+    if (user) {
+      if (!user.googleId) {
+        user.googleId = googleId;
+        await user.save();
+      }
+    } else {
+      let baseUsername = (name || email.split('@')[0])
+        .replace(/\s+/g, '_')
+        .toLowerCase()
+        .slice(0, 10);
+      let username = baseUsername;
+      let count = 1;
+      while (await User.findOne({ username })) {
+        const suffix = String(count++);
+        username = baseUsername.slice(0, 10 - suffix.length) + suffix;
+      }
+
+      user = await User.create({ username, email, googleId, passwordHash: 'GOOGLE_AUTH' });
+    }
+
+    const token = jwt.sign(
+      { userId: user._id, username: user.username },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({ token, user: { id: user._id, username: user.username, email: user.email } });
+
+  } catch (err) {
+    console.error('Google auth error:', err);
+    res.status(401).json({ error: 'Token de Google inválido' });
+  }
+});
+
 // ── VERIFICAR TOKEN ─────────────────────────────────────
-// GET /api/auth/me  (requiere header Authorization: Bearer <token>)
 router.get('/me', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -91,9 +142,7 @@ router.get('/me', async (req, res) => {
   }
 });
 
-// DELETE /api/auth/delete — eliminar cuenta (requiere login)
-const auth = require('../middleware/auth');
-
+// ── ELIMINAR CUENTA ─────────────────────────────────────
 router.delete('/delete', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -104,9 +153,7 @@ router.delete('/delete', auth, async (req, res) => {
   }
 });
 
-
-// GET /api/auth/profile — datos del perfil (requiere login)
-// GET /api/auth/profile
+// ── PERFIL PRIVADO ──────────────────────────────────────
 router.get('/profile', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -121,9 +168,6 @@ router.get('/profile', auth, async (req, res) => {
       .limit(7)
       .select('date points won attempts');
 
-    // Mejor puntuación en una sola partida de contrareloj
-    // (guardamos el máximo de points en timed como bestTimed en User, 
-    //  si no existe usamos totalPoints como aproximación)
     res.json({
       username: user.username,
       email: user.email,
@@ -136,9 +180,8 @@ router.get('/profile', auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-// Añadir este endpoint en routes/auth.js ANTES de module.exports = router;
 
-// GET /api/auth/profile/public/:username — perfil público, sin email
+// ── PERFIL PÚBLICO ──────────────────────────────────────
 router.get('/profile/public/:username', async (req, res) => {
   try {
     const { username } = req.params;
