@@ -86,29 +86,57 @@ router.post('/google', async (req, res) => {
       audience: process.env.GOOGLE_CLIENT_ID,
     });
     const payload = ticket.getPayload();
-    const { sub: googleId, email, name } = payload;
+    const { sub: googleId, email } = payload;
 
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
 
     if (user) {
+      // Usuario existente — vincular googleId si no lo tiene y devolver token
       if (!user.googleId) {
         user.googleId = googleId;
         await user.save();
       }
-    } else {
-      let baseUsername = (name || email.split('@')[0])
-        .replace(/\s+/g, '_')
-        .toLowerCase()
-        .slice(0, 10);
-      let username = baseUsername;
-      let count = 1;
-      while (await User.findOne({ username })) {
-        const suffix = String(count++);
-        username = baseUsername.slice(0, 10 - suffix.length) + suffix;
-      }
 
-      user = await User.create({ username, email, googleId, passwordHash: 'GOOGLE_AUTH' });
+      const token = jwt.sign(
+        { userId: user._id, username: user.username },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      return res.json({ token, user: { id: user._id, username: user.username, email: user.email } });
     }
+
+    // Usuario nuevo — pedir username al frontend
+    return res.json({ needsUsername: true, email });
+
+  } catch (err) {
+    console.error('Google auth error:', err);
+    res.status(401).json({ error: 'Token de Google inválido' });
+  }
+});
+
+// ── GOOGLE COMPLETE (nuevo usuario elige username) ────────
+router.post('/google/complete', async (req, res) => {
+  try {
+    const { credential, username } = req.body;
+    if (!credential || !username)
+      return res.status(400).json({ error: 'Faltan datos' });
+
+    if (username.length < 3 || username.length > 10)
+      return res.status(400).json({ error: 'El usuario debe tener entre 3 y 10 caracteres' });
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const { sub: googleId, email } = payload;
+
+    const existingUsername = await User.findOne({ username });
+    if (existingUsername)
+      return res.status(409).json({ error: 'Ese nombre de usuario ya está en uso' });
+
+    const user = await User.create({ username, email, googleId, passwordHash: 'GOOGLE_AUTH' });
 
     const token = jwt.sign(
       { userId: user._id, username: user.username },
@@ -119,7 +147,7 @@ router.post('/google', async (req, res) => {
     res.json({ token, user: { id: user._id, username: user.username, email: user.email } });
 
   } catch (err) {
-    console.error('Google auth error:', err);
+    console.error('Google complete error:', err);
     res.status(401).json({ error: 'Token de Google inválido' });
   }
 });
