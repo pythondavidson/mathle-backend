@@ -9,6 +9,8 @@ const User = require('../models/User');
 router.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
+    if (username.length > 10)
+      return res.status(400).json({ error: 'El usuario no puede tener más de 10 caracteres' });
 
     if (!username || !email || !password)
       return res.status(400).json({ error: 'Todos los campos son obligatorios' });
