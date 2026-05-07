@@ -13,7 +13,7 @@ const authRoutes  = require('./routes/auth');
 const app = express();
 const server = http.createServer(app);
 
-// ── CORS ────────────────────────────────────────────────
+// ── CORS ─────────────────────────────────────────────────────
 const allowedOrigins = [
   'http://localhost:3000',
   'https://mathle.online',
@@ -23,11 +23,7 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (
-      !origin ||
-      allowedOrigins.includes(origin) ||
-      /^https:\/\/mathle-online.*\.vercel\.app$/.test(origin)
-    ) {
+    if (!origin || allowedOrigins.includes(origin) || /^https:\/\/mathle-online.*\.vercel\.app$/.test(origin)) {
       callback(null, true);
     } else {
       callback(new Error('No permitido por CORS'));
@@ -39,27 +35,52 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// ── SOCKET.IO ────────────────────────────────────────────
-const io = new Server(server, {
-  cors: corsOptions,
-});
+// ── SOCKET.IO ─────────────────────────────────────────────────
+const io = new Server(server, { cors: corsOptions });
 
-// salas: { [codigo]: { players: [socket1, socket2], problem, state } }
+const DUEL_DURATION = 60; // segundos, igual que TimedMode
+
+// salas: { [codigo]: { players: [{id, username, score, solved}], estado, timer } }
 const salas = {};
-
-function generarProblema() {
-  const plantillas = [
-    () => { const a = Math.floor(Math.random()*9)+1, b = Math.floor(Math.random()*9)+1; return { ecuacion: `? + ${b} = ${a+b}`, respuestas: [a] }; },
-    () => { const a = Math.floor(Math.random()*9)+1, b = Math.floor(Math.random()*9)+1; return { ecuacion: `${a+b} - ? = ${b}`, respuestas: [a] }; },
-    () => { const a = Math.floor(Math.random()*9)+1, b = Math.floor(Math.random()*9)+1; return { ecuacion: `? × ${b} = ${a*b}`, respuestas: [a] }; },
-    () => { const b = Math.floor(Math.random()*8)+2, a = b*(Math.floor(Math.random()*9)+1); return { ecuacion: `${a} ÷ ${b} = ?`, respuestas: [a/b] }; },
-    () => { const a = Math.floor(Math.random()*5)+1, b = Math.floor(Math.random()*5)+1, c = a*b+Math.floor(Math.random()*9)+1; return { ecuacion: `? + ${a} × ${b} = ${c}`, respuestas: [c - a*b] }; },
-  ];
-  return plantillas[Math.floor(Math.random()*plantillas.length)]();
-}
 
 function generarCodigo() {
   return Math.random().toString(36).substring(2, 7).toUpperCase();
+}
+
+function terminarDuelo(codigo) {
+  const sala = salas[codigo];
+  if (!sala || sala.estado === 'terminado') return;
+  sala.estado = 'terminado';
+  clearInterval(sala.timer);
+
+  const [p1, p2] = sala.players;
+  let ganador, perdedor, empate = false;
+
+  if (!p2) {
+    // El rival se desconectó antes de terminar
+    if (p1) io.to(codigo).emit('duelo-terminado', { ganador: p1.username, perdedor: '???', desconectado: true, scores: { [p1.username]: p1.score } });
+    setTimeout(() => delete salas[codigo], 30000);
+    return;
+  }
+
+  if (p1.score === p2.score) {
+    empate = true;
+  } else if (p1.score > p2.score) {
+    ganador = p1.username; perdedor = p2.username;
+  } else {
+    ganador = p2.username; perdedor = p1.username;
+  }
+
+  io.to(codigo).emit('duelo-terminado', {
+    ganador: empate ? null : ganador,
+    perdedor: empate ? null : perdedor,
+    empate,
+    scores: { [p1.username]: p1.score, [p2.username]: p2.score },
+    solved: { [p1.username]: p1.solved, [p2.username]: p2.solved },
+  });
+
+  console.log(`Sala ${codigo} terminada. ${empate ? 'Empate' : `Ganador: ${ganador}`} (${p1.username}:${p1.score} vs ${p2.username}:${p2.score})`);
+  setTimeout(() => delete salas[codigo], 30000);
 }
 
 io.on('connection', (socket) => {
@@ -69,87 +90,79 @@ io.on('connection', (socket) => {
   socket.on('crear-duelo', ({ username }) => {
     const codigo = generarCodigo();
     salas[codigo] = {
-      players: [{ id: socket.id, username, listo: false }],
-      problem: null,
+      players: [{ id: socket.id, username, score: 0, solved: 0 }],
       estado: 'esperando',
-      ganador: null,
+      timer: null,
     };
     socket.join(codigo);
     socket.emit('duelo-creado', { codigo });
     console.log(`Sala ${codigo} creada por ${username}`);
   });
 
-  // Unirse a sala
+  // Unirse
   socket.on('unirse-duelo', ({ codigo, username }) => {
     const sala = salas[codigo];
-    if (!sala) {
-      socket.emit('error-duelo', { mensaje: 'Código de duelo no encontrado' });
-      return;
-    }
-    if (sala.players.length >= 2) {
-      socket.emit('error-duelo', { mensaje: 'La sala ya está llena' });
-      return;
-    }
-    if (sala.estado !== 'esperando') {
-      socket.emit('error-duelo', { mensaje: 'El duelo ya ha comenzado' });
-      return;
-    }
+    if (!sala)                      { socket.emit('error-duelo', { mensaje: 'Código no encontrado' }); return; }
+    if (sala.players.length >= 2)   { socket.emit('error-duelo', { mensaje: 'La sala ya está llena' }); return; }
+    if (sala.estado !== 'esperando'){ socket.emit('error-duelo', { mensaje: 'El duelo ya ha comenzado' }); return; }
 
-    sala.players.push({ id: socket.id, username, listo: false });
+    sala.players.push({ id: socket.id, username, score: 0, solved: 0 });
     socket.join(codigo);
-
-    // Generar problema y arrancar
-    sala.problem = generarProblema();
-    sala.estado = 'jugando';
+    sala.estado = 'countdown';
 
     const nombres = sala.players.map(p => p.username);
-    io.to(codigo).emit('duelo-iniciado', {
-      problem: sala.problem,
-      players: nombres,
-    });
-
+    io.to(codigo).emit('duelo-iniciado', { players: nombres });
     console.log(`Sala ${codigo} iniciada: ${nombres.join(' vs ')}`);
+
+    // Arrancar el timer de 60s después del countdown (5s + margen)
+    setTimeout(() => {
+      if (!salas[codigo] || salas[codigo].estado === 'terminado') return;
+      salas[codigo].estado = 'jugando';
+      io.to(codigo).emit('duelo-arranca'); // frontend arranca su timer local
+
+      sala.timer = setInterval(() => {
+        // Simplemente esperamos — el tiempo lo lleva el frontend.
+        // El backend termina cuando ambos clientes emiten 'tiempo-agotado'
+        // o cuando pasan 65s de margen
+      }, 1000);
+
+      // Forzar fin después de 65s (60s + 5s de margen)
+      setTimeout(() => terminarDuelo(codigo), 65000);
+    }, 6000); // 5s countdown + 1s buffer
   });
 
-  // Enviar respuesta
-  socket.on('respuesta-duelo', ({ codigo, respuesta }) => {
+  // Cliente informa su score final cuando se le acaba el tiempo
+  socket.on('tiempo-agotado', ({ codigo, score, solved }) => {
     const sala = salas[codigo];
-    if (!sala || sala.estado !== 'jugando') return;
-
+    if (!sala) return;
     const player = sala.players.find(p => p.id === socket.id);
     if (!player) return;
+    player.score = score;
+    player.solved = solved;
+    player.finished = true;
+    console.log(`${player.username} terminó con score ${score} en sala ${codigo}`);
 
-    const correctas = sala.problem.respuestas;
-    const esCorrecta = correctas.every((r, i) => Number(respuesta[i]) === r);
-
-    if (esCorrecta && !sala.ganador) {
-      sala.ganador = player.username;
-      sala.estado = 'terminado';
-      io.to(codigo).emit('duelo-terminado', {
-        ganador: player.username,
-        perdedor: sala.players.find(p => p.id !== socket.id)?.username,
-      });
-      console.log(`Sala ${codigo}: ganador ${player.username}`);
-      // Limpiar sala después de 30s
-      setTimeout(() => delete salas[codigo], 30000);
-    } else if (!esCorrecta) {
-      socket.emit('respuesta-incorrecta');
+    // Si los dos han terminado, resolver ahora sin esperar el timeout
+    if (sala.players.length === 2 && sala.players.every(p => p.finished)) {
+      terminarDuelo(codigo);
     }
   });
 
   // Rendirse
   socket.on('rendirse', ({ codigo }) => {
     const sala = salas[codigo];
-    if (!sala || sala.estado !== 'jugando') return;
-    const player = sala.players.find(p => p.id === socket.id);
-    const rival = sala.players.find(p => p.id !== socket.id);
-    if (!player || !rival) return;
+    if (!sala || sala.estado === 'terminado') return;
+    const player  = sala.players.find(p => p.id === socket.id);
+    const rival   = sala.players.find(p => p.id !== socket.id);
+    if (!player) return;
     sala.estado = 'terminado';
-    sala.ganador = rival.username;
+    clearInterval(sala.timer);
     io.to(codigo).emit('duelo-terminado', {
-      ganador: rival.username,
+      ganador: rival?.username ?? null,
       perdedor: player.username,
       rendido: true,
+      scores: Object.fromEntries(sala.players.map(p => [p.username, p.score])),
+      solved: Object.fromEntries(sala.players.map(p => [p.username, p.solved])),
     });
     setTimeout(() => delete salas[codigo], 30000);
   });
@@ -159,62 +172,55 @@ io.on('connection', (socket) => {
     for (const codigo in salas) {
       const sala = salas[codigo];
       const idx = sala.players.findIndex(p => p.id === socket.id);
-      if (idx !== -1) {
-        if (sala.estado === 'jugando') {
-          const rival = sala.players.find(p => p.id !== socket.id);
-          if (rival) {
-            io.to(codigo).emit('duelo-terminado', {
-              ganador: rival.username,
-              perdedor: sala.players[idx].username,
-              desconectado: true,
-            });
-          }
+      if (idx === -1) continue;
+      if (sala.estado === 'jugando' || sala.estado === 'countdown') {
+        const rival = sala.players.find(p => p.id !== socket.id);
+        sala.estado = 'terminado';
+        clearInterval(sala.timer);
+        if (rival) {
+          io.to(codigo).emit('duelo-terminado', {
+            ganador: rival.username,
+            perdedor: sala.players[idx].username,
+            desconectado: true,
+            scores: { [rival.username]: rival.score, [sala.players[idx].username]: sala.players[idx].score },
+            solved: { [rival.username]: rival.solved, [sala.players[idx].username]: sala.players[idx].solved },
+          });
         }
+        setTimeout(() => delete salas[codigo], 30000);
+      } else {
         delete salas[codigo];
-        break;
       }
+      break;
     }
     console.log('Socket desconectado:', socket.id);
   });
 });
 
-// ── RATE LIMITING ────────────────────────────────────────
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: 'Demasiadas peticiones, espera un momento' },
-});
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { error: 'Demasiados intentos, espera 15 minutos' },
-});
-
+// ── RATE LIMITING ─────────────────────────────────────────────
+const generalLimiter = rateLimit({ windowMs: 15*60*1000, max: 100, message: { error: 'Demasiadas peticiones' } });
+const authLimiter    = rateLimit({ windowMs: 15*60*1000, max: 10,  message: { error: 'Demasiados intentos' } });
 app.use(generalLimiter);
 app.use('/api/auth/login',    authLimiter);
 app.use('/api/auth/register', authLimiter);
 
-// ── MONGODB ──────────────────────────────────────────────
+// ── MONGODB ───────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB conectado'))
   .catch(err => console.error('Error MongoDB:', err));
 
-// ── RUTAS ────────────────────────────────────────────────
+// ── RUTAS ─────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({ status: 'Mathle API running' }));
 app.use('/api/auth',  authRoutes);
 app.use('/api/daily', dailyRoutes);
 app.use('/api/timed', timedRoutes);
 
-// ── ERRORES ──────────────────────────────────────────────
+// ── ERRORES ───────────────────────────────────────────────────
 app.use((err, req, res, next) => {
-  if (err.message === 'No permitido por CORS') {
-    return res.status(403).json({ error: 'Origen no permitido' });
-  }
+  if (err.message === 'No permitido por CORS') return res.status(403).json({ error: 'Origen no permitido' });
   console.error(err.stack);
   res.status(500).json({ error: 'Error interno del servidor' });
 });
 
-// ── ARRANQUE ─────────────────────────────────────────────
+// ── ARRANQUE ──────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
