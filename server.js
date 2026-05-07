@@ -9,6 +9,7 @@ const { Server } = require('socket.io');
 const dailyRoutes = require('./routes/daily');
 const timedRoutes = require('./routes/timed');
 const authRoutes  = require('./routes/auth');
+const User        = require('./models/User');
 
 const app = express();
 const server = http.createServer(app);
@@ -69,6 +70,12 @@ function terminarDuelo(codigo) {
     ganador = p1.username; perdedor = p2.username;
   } else {
     ganador = p2.username; perdedor = p1.username;
+  }
+
+  // Incrementar duelWins al ganador en MongoDB
+  if (!empate && ganador) {
+    User.findOneAndUpdate({ username: ganador }, { $inc: { duelWins: 1 } })
+      .catch(err => console.error('Error actualizando duelWins:', err));
   }
 
   io.to(codigo).emit('duelo-terminado', {

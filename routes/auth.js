@@ -201,6 +201,7 @@ router.get('/profile', auth, async (req, res) => {
       email: user.email,
       totalPoints: user.totalPoints,
       streakDays: user.streakDays,
+      duelWins: user.duelWins || 0,
       rank: rank + 1,
       last7: last7.reverse(),
     });
@@ -228,6 +229,7 @@ router.get('/profile/public/:username', async (req, res) => {
       username: user.username,
       totalPoints: user.totalPoints,
       streakDays: user.streakDays,
+      duelWins: user.duelWins || 0,
       rank: rank + 1,
       last7: last7.reverse(),
     });

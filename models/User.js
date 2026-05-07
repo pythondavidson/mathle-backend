@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema({
   totalPoints:  { type: Number, default: 0 },
   streakDays:   { type: Number, default: 0 },
   lastPlayDate: { type: String, default: "" },
+  duelWins:     { type: Number, default: 0 },
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);
