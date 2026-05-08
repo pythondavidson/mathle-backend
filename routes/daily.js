@@ -30,22 +30,26 @@ router.post('/score', auth, async (req, res) => {
   }
 });
 
-// GET /api/daily/leaderboard — público
+// GET /api/daily/leaderboard?filter=hoy|semana|alltime
+// Devuelve el RÉCORD (mejor partida), no la acumulación
 router.get('/leaderboard', async (req, res) => {
   try {
     const { filter = 'hoy' } = req.query;
     const today = new Date().toISOString().split('T')[0];
 
     let dateFilter = {};
-    if (filter === 'hoy') dateFilter = { date: today };
-    else if (filter === 'semana') {
+    if (filter === 'hoy') {
+      dateFilter = { date: today };
+    } else if (filter === 'semana') {
       const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
       dateFilter = { date: { $gte: weekAgo } };
     }
+    // alltime: sin filtro de fecha
 
     const scores = await DailyScore.aggregate([
       { $match: { won: true, ...dateFilter } },
-      { $group: { _id: '$userId', pts: { $sum: '$points' } } },
+      // Récord: mejor puntuación individual, no suma
+      { $group: { _id: '$userId', pts: { $max: '$points' } } },
       { $sort: { pts: -1 } },
       { $limit: 10 },
       { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
