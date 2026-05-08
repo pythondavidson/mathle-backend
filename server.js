@@ -3,6 +3,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const mongoSanitize = require('express-mongo-sanitize');
 const http = require('http');
 const { Server } = require('socket.io');
 
@@ -14,7 +16,14 @@ const User        = require('./models/User');
 const app = express();
 const server = http.createServer(app);
 
-// ── CORS ─────────────────────────────────────────────────────
+// ── SEGURIDAD — headers HTTP ──────────────────────────────────
+app.use(helmet({
+  crossOriginEmbedderPolicy: false, // necesario para Google AdSense
+  contentSecurityPolicy: false,     // Next.js gestiona su propio CSP
+}));
+app.disable('x-powered-by'); // helmet ya lo hace, doble garantía
+
+// ── CORS ──────────────────────────────────────────────────────
 const allowedOrigins = [
   'http://localhost:3000',
   'https://mathle.online',
@@ -34,14 +43,51 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+
+// ── BODY PARSING ──────────────────────────────────────────────
+app.use(express.json({ limit: '10kb' })); // limita tamaño del body
+app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+
+// ── MONGO INJECTION SANITIZE ──────────────────────────────────
+// Elimina operadores $ y . de los inputs antes de que lleguen a Mongoose
+app.use(mongoSanitize());
+
+// ── RATE LIMITING ─────────────────────────────────────────────
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas peticiones, intenta más tarde' },
+});
+
+// Auth más estricto: 10 intentos cada 15 min por IP
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos de acceso. Espera 15 minutos.' },
+});
+
+// Scores: evitar spam de puntuaciones
+const scoreLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: 'Demasiadas peticiones de puntuación' },
+});
+
+app.use('/api/', generalLimiter);
+app.use('/api/auth/login',        authLimiter);
+app.use('/api/auth/register',     authLimiter);
+app.use('/api/auth/google',       authLimiter);
+app.use('/api/daily/score',       scoreLimiter);
+app.use('/api/timed/score',       scoreLimiter);
 
 // ── SOCKET.IO ─────────────────────────────────────────────────
 const io = new Server(server, { cors: corsOptions });
 
-const DUEL_DURATION = 60; // segundos, igual que TimedMode
-
-// salas: { [codigo]: { players: [{id, username, score, solved}], estado, timer } }
+const DUEL_DURATION = 60;
 const salas = {};
 
 function generarCodigo() {
@@ -58,7 +104,6 @@ function terminarDuelo(codigo) {
   let ganador, perdedor, empate = false;
 
   if (!p2) {
-    // El rival se desconectó antes de terminar
     if (p1) io.to(codigo).emit('duelo-terminado', { ganador: p1.username, perdedor: '???', desconectado: true, scores: { [p1.username]: p1.score } });
     setTimeout(() => delete salas[codigo], 30000);
     return;
@@ -72,7 +117,6 @@ function terminarDuelo(codigo) {
     ganador = p2.username; perdedor = p1.username;
   }
 
-  // Incrementar duelWins al ganador en MongoDB
   if (!empate && ganador) {
     User.findOneAndUpdate({ username: ganador }, { $inc: { duelWins: 1 } })
       .catch(err => console.error('Error actualizando duelWins:', err));
@@ -86,34 +130,35 @@ function terminarDuelo(codigo) {
     solved: { [p1.username]: p1.solved, [p2.username]: p2.solved },
   });
 
-  console.log(`Sala ${codigo} terminada. ${empate ? 'Empate' : `Ganador: ${ganador}`} (${p1.username}:${p1.score} vs ${p2.username}:${p2.score})`);
+  console.log(`Sala ${codigo} terminada. ${empate ? 'Empate' : `Ganador: ${ganador}`}`);
   setTimeout(() => delete salas[codigo], 30000);
 }
 
 io.on('connection', (socket) => {
   console.log('Socket conectado:', socket.id);
 
-  // Crear sala
   socket.on('crear-duelo', ({ username }) => {
+    // Sanitizar username por si acaso
+    const safeUsername = String(username).slice(0, 10);
     const codigo = generarCodigo();
     salas[codigo] = {
-      players: [{ id: socket.id, username, score: 0, solved: 0 }],
+      players: [{ id: socket.id, username: safeUsername, score: 0, solved: 0 }],
       estado: 'esperando',
       timer: null,
     };
     socket.join(codigo);
     socket.emit('duelo-creado', { codigo });
-    console.log(`Sala ${codigo} creada por ${username}`);
+    console.log(`Sala ${codigo} creada por ${safeUsername}`);
   });
 
-  // Unirse
   socket.on('unirse-duelo', ({ codigo, username }) => {
+    const safeUsername = String(username).slice(0, 10);
     const sala = salas[codigo];
-    if (!sala)                      { socket.emit('error-duelo', { mensaje: 'Código no encontrado' }); return; }
-    if (sala.players.length >= 2)   { socket.emit('error-duelo', { mensaje: 'La sala ya está llena' }); return; }
-    if (sala.estado !== 'esperando'){ socket.emit('error-duelo', { mensaje: 'El duelo ya ha comenzado' }); return; }
+    if (!sala)                       { socket.emit('error-duelo', { mensaje: 'Código no encontrado' }); return; }
+    if (sala.players.length >= 2)    { socket.emit('error-duelo', { mensaje: 'La sala ya está llena' }); return; }
+    if (sala.estado !== 'esperando') { socket.emit('error-duelo', { mensaje: 'El duelo ya ha comenzado' }); return; }
 
-    sala.players.push({ id: socket.id, username, score: 0, solved: 0 });
+    sala.players.push({ id: socket.id, username: safeUsername, score: 0, solved: 0 });
     socket.join(codigo);
     sala.estado = 'countdown';
 
@@ -121,46 +166,35 @@ io.on('connection', (socket) => {
     io.to(codigo).emit('duelo-iniciado', { players: nombres });
     console.log(`Sala ${codigo} iniciada: ${nombres.join(' vs ')}`);
 
-    // Arrancar el timer de 60s después del countdown (5s + margen)
     setTimeout(() => {
       if (!salas[codigo] || salas[codigo].estado === 'terminado') return;
       salas[codigo].estado = 'jugando';
-      io.to(codigo).emit('duelo-arranca'); // frontend arranca su timer local
-
-      sala.timer = setInterval(() => {
-        // Simplemente esperamos — el tiempo lo lleva el frontend.
-        // El backend termina cuando ambos clientes emiten 'tiempo-agotado'
-        // o cuando pasan 65s de margen
-      }, 1000);
-
-      // Forzar fin después de 65s (60s + 5s de margen)
+      io.to(codigo).emit('duelo-arranca');
       setTimeout(() => terminarDuelo(codigo), 65000);
-    }, 6000); // 5s countdown + 1s buffer
+    }, 6000);
   });
 
-  // Cliente informa su score final cuando se le acaba el tiempo
   socket.on('tiempo-agotado', ({ codigo, score, solved }) => {
     const sala = salas[codigo];
     if (!sala) return;
     const player = sala.players.find(p => p.id === socket.id);
     if (!player) return;
-    player.score = score;
-    player.solved = solved;
+    // Validar que score es un número y no es absurdamente alto
+    player.score  = typeof score === 'number' && score >= 0 && score < 1_000_000 ? Math.round(score) : 0;
+    player.solved = typeof solved === 'number' && solved >= 0 ? Math.round(solved) : 0;
     player.finished = true;
-    console.log(`${player.username} terminó con score ${score} en sala ${codigo}`);
+    console.log(`${player.username} terminó con score ${player.score} en sala ${codigo}`);
 
-    // Si los dos han terminado, resolver ahora sin esperar el timeout
     if (sala.players.length === 2 && sala.players.every(p => p.finished)) {
       terminarDuelo(codigo);
     }
   });
 
-  // Rendirse
   socket.on('rendirse', ({ codigo }) => {
     const sala = salas[codigo];
     if (!sala || sala.estado === 'terminado') return;
-    const player  = sala.players.find(p => p.id === socket.id);
-    const rival   = sala.players.find(p => p.id !== socket.id);
+    const player = sala.players.find(p => p.id === socket.id);
+    const rival  = sala.players.find(p => p.id !== socket.id);
     if (!player) return;
     sala.estado = 'terminado';
     clearInterval(sala.timer);
@@ -174,7 +208,6 @@ io.on('connection', (socket) => {
     setTimeout(() => delete salas[codigo], 30000);
   });
 
-  // Desconexión
   socket.on('disconnect', () => {
     for (const codigo in salas) {
       const sala = salas[codigo];
@@ -203,27 +236,23 @@ io.on('connection', (socket) => {
   });
 });
 
-// ── RATE LIMITING ─────────────────────────────────────────────
-const generalLimiter = rateLimit({ windowMs: 15*60*1000, max: 100, message: { error: 'Demasiadas peticiones' } });
-const authLimiter    = rateLimit({ windowMs: 15*60*1000, max: 10,  message: { error: 'Demasiados intentos' } });
-app.use(generalLimiter);
-app.use('/api/auth/login',    authLimiter);
-app.use('/api/auth/register', authLimiter);
-
 // ── MONGODB ───────────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI, {
+  serverSelectionTimeoutMS: 5000,
+})
   .then(() => console.log('MongoDB conectado'))
   .catch(err => console.error('Error MongoDB:', err));
 
 // ── RUTAS ─────────────────────────────────────────────────────
-app.get('/', (req, res) => res.json({ status: 'Mathle API running' }));
+app.get('/', (req, res) => res.json({ status: 'ok' })); // no revelar nombre del proyecto
 app.use('/api/auth',  authRoutes);
 app.use('/api/daily', dailyRoutes);
 app.use('/api/timed', timedRoutes);
 
-// ── ERRORES ───────────────────────────────────────────────────
+// ── MANEJADOR DE ERRORES GLOBAL ───────────────────────────────
 app.use((err, req, res, next) => {
   if (err.message === 'No permitido por CORS') return res.status(403).json({ error: 'Origen no permitido' });
+  // No filtrar el stack en producción
   console.error(err.stack);
   res.status(500).json({ error: 'Error interno del servidor' });
 });

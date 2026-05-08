@@ -8,7 +8,11 @@ const auth = require('../middleware/auth');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// ── REGISTRO ────────────────────────────────────────────
+// ── VALIDACIONES ─────────────────────────────────────────────
+const EMAIL_REGEX    = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USERNAME_REGEX = /^[a-zA-Z0-9_]+$/; // solo alfanumérico y guion bajo
+
+// ── REGISTRO ─────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -16,18 +20,27 @@ router.post('/register', async (req, res) => {
     if (!username || !email || !password)
       return res.status(400).json({ error: 'Todos los campos son obligatorios' });
 
-    if (username.length > 10)
-      return res.status(400).json({ error: 'El usuario no puede tener más de 10 caracteres' });
+    if (username.length < 3 || username.length > 10)
+      return res.status(400).json({ error: 'El usuario debe tener entre 3 y 10 caracteres' });
+
+    if (!USERNAME_REGEX.test(username))
+      return res.status(400).json({ error: 'El usuario solo puede contener letras, números y guiones bajos' });
+
+    if (!EMAIL_REGEX.test(email))
+      return res.status(400).json({ error: 'Email no válido' });
 
     if (password.length < 6)
       return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
 
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    if (password.length > 128)
+      return res.status(400).json({ error: 'Contraseña demasiado larga' });
+
+    const existingUser = await User.findOne({ $or: [{ email: email.toLowerCase() }, { username }] });
     if (existingUser)
       return res.status(409).json({ error: 'El usuario o email ya existe' });
 
-    const passwordHash = await bcrypt.hash(password, 10);
-    const user = await User.create({ username, email, passwordHash });
+    const passwordHash = await bcrypt.hash(password, 12); // subido de 10 a 12
+    const user = await User.create({ username, email: email.toLowerCase(), passwordHash });
 
     const token = jwt.sign(
       { userId: user._id, username: user.username },
@@ -40,11 +53,11 @@ router.post('/register', async (req, res) => {
       user: { id: user._id, username: user.username, email: user.email }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Error al registrar el usuario' }); // no filtrar err.message en prod
   }
 });
 
-// ── LOGIN ───────────────────────────────────────────────
+// ── LOGIN ─────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -52,12 +65,18 @@ router.post('/login', async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ error: 'Email y contraseña son obligatorios' });
 
-    const user = await User.findOne({ $or: [{ email }, { username: email }] });
-    if (!user)
-      return res.status(401).json({ error: 'Credenciales incorrectas' });
+    if (typeof email !== 'string' || typeof password !== 'string')
+      return res.status(400).json({ error: 'Datos inválidos' });
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid)
+    const user = await User.findOne({ $or: [{ email: email.toLowerCase() }, { username: email }] });
+
+    // Siempre hacer bcrypt aunque no exista el user (evita timing attacks)
+    const dummyHash = '$2b$12$invalidhashinvalidhashinvalidhashinvalidhashXXXXXXXXXX';
+    const valid = user
+      ? await bcrypt.compare(password, user.passwordHash)
+      : await bcrypt.compare(password, dummyHash).then(() => false);
+
+    if (!user || !valid)
       return res.status(401).json({ error: 'Credenciales incorrectas' });
 
     const token = jwt.sign(
@@ -71,15 +90,16 @@ router.post('/login', async (req, res) => {
       user: { id: user._id, username: user.username, email: user.email }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Error al iniciar sesión' });
   }
 });
 
-// ── GOOGLE LOGIN ─────────────────────────────────────────
+// ── GOOGLE LOGIN ──────────────────────────────────────────────
 router.post('/google', async (req, res) => {
   try {
     const { credential } = req.body;
-    if (!credential) return res.status(400).json({ error: 'Credential requerido' });
+    if (!credential || typeof credential !== 'string')
+      return res.status(400).json({ error: 'Credential requerido' });
 
     const ticket = await googleClient.verifyIdToken({
       idToken: credential,
@@ -88,25 +108,20 @@ router.post('/google', async (req, res) => {
     const payload = ticket.getPayload();
     const { sub: googleId, email } = payload;
 
-    let user = await User.findOne({ $or: [{ googleId }, { email }] });
+    if (!email) return res.status(400).json({ error: 'No se pudo obtener el email de Google' });
+
+    let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
 
     if (user) {
-      // Usuario existente — vincular googleId si no lo tiene y devolver token
-      if (!user.googleId) {
-        user.googleId = googleId;
-        await user.save();
-      }
-
+      if (!user.googleId) { user.googleId = googleId; await user.save(); }
       const token = jwt.sign(
         { userId: user._id, username: user.username },
         process.env.JWT_SECRET,
         { expiresIn: '7d' }
       );
-
       return res.json({ token, user: { id: user._id, username: user.username, email: user.email } });
     }
 
-    // Usuario nuevo — pedir username al frontend
     return res.json({ needsUsername: true, email });
 
   } catch (err) {
@@ -115,15 +130,21 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// ── GOOGLE COMPLETE (nuevo usuario elige username) ────────
+// ── GOOGLE COMPLETE ───────────────────────────────────────────
 router.post('/google/complete', async (req, res) => {
   try {
     const { credential, username } = req.body;
     if (!credential || !username)
       return res.status(400).json({ error: 'Faltan datos' });
 
+    if (typeof username !== 'string')
+      return res.status(400).json({ error: 'Datos inválidos' });
+
     if (username.length < 3 || username.length > 10)
       return res.status(400).json({ error: 'El usuario debe tener entre 3 y 10 caracteres' });
+
+    if (!USERNAME_REGEX.test(username))
+      return res.status(400).json({ error: 'El usuario solo puede contener letras, números y guiones bajos' });
 
     const ticket = await googleClient.verifyIdToken({
       idToken: credential,
@@ -136,7 +157,7 @@ router.post('/google/complete', async (req, res) => {
     if (existingUsername)
       return res.status(409).json({ error: 'Ese nombre de usuario ya está en uso' });
 
-    const user = await User.create({ username, email, googleId, passwordHash: 'GOOGLE_AUTH' });
+    const user = await User.create({ username, email: email.toLowerCase(), googleId, passwordHash: 'GOOGLE_AUTH' });
 
     const token = jwt.sign(
       { userId: user._id, username: user.username },
@@ -152,7 +173,7 @@ router.post('/google/complete', async (req, res) => {
   }
 });
 
-// ── VERIFICAR TOKEN ─────────────────────────────────────
+// ── VERIFICAR TOKEN ───────────────────────────────────────────
 router.get('/me', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -170,18 +191,18 @@ router.get('/me', async (req, res) => {
   }
 });
 
-// ── ELIMINAR CUENTA ─────────────────────────────────────
+// ── ELIMINAR CUENTA ───────────────────────────────────────────
 router.delete('/delete', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
     await User.findByIdAndDelete(userId);
     res.json({ message: 'Cuenta eliminada correctamente' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Error al eliminar la cuenta' });
   }
 });
 
-// ── PERFIL PRIVADO ──────────────────────────────────────
+// ── PERFIL PRIVADO ────────────────────────────────────────────
 router.get('/profile', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -206,14 +227,19 @@ router.get('/profile', auth, async (req, res) => {
       last7: last7.reverse(),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Error al obtener el perfil' });
   }
 });
 
-// ── PERFIL PÚBLICO ──────────────────────────────────────
+// ── PERFIL PÚBLICO ────────────────────────────────────────────
 router.get('/profile/public/:username', async (req, res) => {
   try {
     const { username } = req.params;
+
+    // Validar que el username del param es seguro antes de buscar
+    if (!USERNAME_REGEX.test(username) || username.length > 10)
+      return res.status(400).json({ error: 'Username inválido' });
+
     const user = await User.findOne({ username }).select('-passwordHash -email');
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
@@ -234,7 +260,7 @@ router.get('/profile/public/:username', async (req, res) => {
       last7: last7.reverse(),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Error al obtener el perfil' });
   }
 });
 
