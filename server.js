@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
-const mongoSanitize = require('express-mongo-sanitize');
+
 const http = require('http');
 const { Server } = require('socket.io');
 
@@ -49,8 +49,24 @@ app.use(express.json({ limit: '10kb' })); // limita tamaño del body
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
 
 // ── MONGO INJECTION SANITIZE ──────────────────────────────────
-// Elimina operadores $ y . de los inputs antes de que lleguen a Mongoose
-app.use(mongoSanitize());
+// Sanitización manual compatible con todas las versiones de Express
+// Elimina claves que empiecen por $ o contengan . de body y params
+function sanitizeMongo(obj) {
+  if (obj && typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        delete obj[key];
+      } else {
+        sanitizeMongo(obj[key]);
+      }
+    }
+  }
+}
+app.use((req, res, next) => {
+  sanitizeMongo(req.body);
+  sanitizeMongo(req.params);
+  next();
+});
 
 // ── RATE LIMITING ─────────────────────────────────────────────
 const generalLimiter = rateLimit({
