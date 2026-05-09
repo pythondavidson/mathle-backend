@@ -39,7 +39,7 @@ router.post('/register', async (req, res) => {
     if (existingUser)
       return res.status(409).json({ error: 'El usuario o email ya existe' });
 
-    const passwordHash = await bcrypt.hash(password, 12); // subido de 10 a 12
+    const passwordHash = await bcrypt.hash(password, 12);
     const user = await User.create({ username, email: email.toLowerCase(), passwordHash });
 
     const token = jwt.sign(
@@ -53,7 +53,7 @@ router.post('/register', async (req, res) => {
       user: { id: user._id, username: user.username, email: user.email }
     });
   } catch (err) {
-    res.status(500).json({ error: 'Error al registrar el usuario' }); // no filtrar err.message en prod
+    res.status(500).json({ error: 'Error al registrar el usuario' });
   }
 });
 
@@ -202,6 +202,33 @@ router.delete('/delete', auth, async (req, res) => {
   }
 });
 
+// ── HELPER: últimos 7 días combinando Daily + Timed ───────────
+async function getLast7(userId) {
+  const DailyScore = require('../models/DailyScore');
+  const TimedScore = require('../models/TimedScore');
+
+  const [dailyScores, timedScores] = await Promise.all([
+    DailyScore.find({ userId }).sort({ date: -1 }).limit(7).select('date points won'),
+    TimedScore.find({ userId }).sort({ date: -1 }).limit(7).select('date points'),
+  ]);
+
+  const scoreMap = {};
+  for (const s of dailyScores) {
+    scoreMap[s.date] = { date: s.date, points: s.points, won: s.won };
+  }
+  for (const s of timedScores) {
+    if (scoreMap[s.date]) {
+      scoreMap[s.date].points += s.points;
+    } else {
+      scoreMap[s.date] = { date: s.date, points: s.points, won: false };
+    }
+  }
+
+  return Object.values(scoreMap)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-7);
+}
+
 // ── PERFIL PRIVADO ────────────────────────────────────────────
 router.get('/profile', auth, async (req, res) => {
   try {
@@ -209,22 +236,23 @@ router.get('/profile', auth, async (req, res) => {
     const user = await User.findById(userId).select('-passwordHash');
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-    const rank = await User.countDocuments({ totalPoints: { $gt: user.totalPoints } });
+    const totalPoints = (user.totalPoints || 0) + (user.totalTimedPoints || 0);
+    const rank = await User.countDocuments({
+      $expr: {
+        $gt: [{ $add: ['$totalPoints', '$totalTimedPoints'] }, totalPoints]
+      }
+    });
 
-    const DailyScore = require('../models/DailyScore');
-    const last7 = await DailyScore.find({ userId })
-      .sort({ date: -1 })
-      .limit(7)
-      .select('date points won attempts');
+    const last7 = await getLast7(userId);
 
     res.json({
       username: user.username,
       email: user.email,
-      totalPoints: user.totalPoints,
+      totalPoints,
       streakDays: user.streakDays,
       duelWins: user.duelWins || 0,
       rank: rank + 1,
-      last7: last7.reverse(),
+      last7,
     });
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener el perfil' });
@@ -236,28 +264,28 @@ router.get('/profile/public/:username', async (req, res) => {
   try {
     const { username } = req.params;
 
-    // Validar que el username del param es seguro antes de buscar
     if (!USERNAME_REGEX.test(username) || username.length > 10)
       return res.status(400).json({ error: 'Username inválido' });
 
     const user = await User.findOne({ username }).select('-passwordHash -email');
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-    const rank = await User.countDocuments({ totalPoints: { $gt: user.totalPoints } });
+    const totalPoints = (user.totalPoints || 0) + (user.totalTimedPoints || 0);
+    const rank = await User.countDocuments({
+      $expr: {
+        $gt: [{ $add: ['$totalPoints', '$totalTimedPoints'] }, totalPoints]
+      }
+    });
 
-    const DailyScore = require('../models/DailyScore');
-    const last7 = await DailyScore.find({ userId: user._id })
-      .sort({ date: -1 })
-      .limit(7)
-      .select('date points won attempts');
+    const last7 = await getLast7(user._id);
 
     res.json({
       username: user.username,
-      totalPoints: user.totalPoints,
+      totalPoints,
       streakDays: user.streakDays,
       duelWins: user.duelWins || 0,
       rank: rank + 1,
-      last7: last7.reverse(),
+      last7,
     });
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener el perfil' });

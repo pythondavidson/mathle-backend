@@ -18,8 +18,15 @@ router.post('/score', auth, async (req, res) => {
     const user = await User.findById(userId);
     if (user) {
       user.totalPoints += points;
+
       const yesterday = new Date(new Date(date) - 86400000).toISOString().split('T')[0];
-      user.streakDays = won ? (user.lastPlayDate === yesterday ? user.streakDays + 1 : 1) : 0;
+      // La racha solo se rompe si no jugaste ayer — no depende de si ganaste
+      if (user.lastPlayDate === yesterday) {
+        user.streakDays = user.streakDays + 1;
+      } else if (user.lastPlayDate !== date) {
+        user.streakDays = 1; // primer día o racha rota
+      }
+      // Si lastPlayDate === date ya jugó hoy, no tocar la racha
       user.lastPlayDate = date;
       await user.save();
     }
@@ -48,7 +55,6 @@ router.get('/leaderboard', async (req, res) => {
 
     const scores = await DailyScore.aggregate([
       { $match: { won: true, ...dateFilter } },
-      // Récord: mejor puntuación individual, no suma
       { $group: { _id: '$userId', pts: { $max: '$points' } } },
       { $sort: { pts: -1 } },
       { $limit: 10 },
